@@ -1,4 +1,3 @@
-# kafka_demo
 # Kafka Demo
 
 Prosty projekt demonstracyjny pokazujący komunikację między usługami przy użyciu Kafki. Celem tego repozytorium jest przedstawienie podstawowego przepływu zdarzeń w architekturze event-driven oraz pokazanie, jak testować takie scenariusze w praktyce.
