@@ -1,180 +1,145 @@
-# Kafka Demo
+# Kafka Testing Demo
 
-Prosty projekt demonstracyjny pokazujący komunikację między usługami przy użyciu Kafki. Celem tego repozytorium jest przedstawienie podstawowego przepływu zdarzeń w architekturze event-driven oraz pokazanie, jak testować takie scenariusze w praktyce.
+Portfolio project demonstrating test strategies for two independently runnable Spring Boot services communicating through Apache Kafka.
 
-## Cel projektu
+## Architecture
 
-Projekt ma za zadanie zademonstrować:
-- wysyłanie wiadomości do topicu w Apache Kafka,
-- odbieranie wiadomości przez konsumenta,
-- prostą integrację między serwisami,
-- testy integracyjne sprawdzające rzeczywistą komunikację przez brokera wiadomości,
-- dobry wzorzec do dalszej rozbudowy o retry, idempotencję i obsługę błędów.
+```text
+POST /orders
+     |
+     v
+Order Service -- OrderCreated --> Kafka topic `orders` --> Billing Service
+                                                               |
+                                                  success      | invalid / retries exhausted
+                                                     v         v
+                                            in-memory payments `orders.DLT`
+```
 
-## Architektura
+Order Service validates a request, creates an order and an `OrderCreated` event, then responds with `202 Accepted` after Kafka acknowledges the send. Billing Service consumes the event and stores a payment in an in-memory repository. The repository is intentionally simple: its data is lost when Billing Service restarts.
 
-W najprostszej wersji projekt składa się z:
-- producenta (producer), który wysyła zdarzenie do Kafki,
-- topicu `orders` lub podobnego,
-- konsumenta, który odbiera wiadomość i wykonuje dalszą logikę biznesową.
+The shared event contract contains:
 
-Przykładowy przepływ:
-1. Aplikacja wysyła żądanie utworzenia zamówienia.
-2. Producent publikuje zdarzenie do Kafki.
-3. Konsument pobiera wiadomość z topicu.
-4. Następuje przetworzenie danych i zapis wyniku lub wykonanie dalszej operacji.
+| Field | Meaning |
+| --- | --- |
+| `eventId` | Unique identifier for this event; the idempotency key |
+| `orderId` | Order identifier; also the Kafka message key |
+| `createdAt` | Event creation time in UTC |
+| `amount` | Positive order amount |
 
-## Technologie
+## Technology
 
-- Java
-- Spring Boot
-- Spring Kafka
-- Apache Kafka
-- Maven / Gradle
+- Java 17
+- Spring Boot 3.4.5 and Spring Kafka
+- Maven
 - JUnit 5
-- Testcontainers (dla testów integracyjnych)
-- Docker / Docker Compose
+- Testcontainers 2.0.3
+- Awaitility 4.2.2
+- Apache Kafka image `apache/kafka:3.8.0`
 
-## Wymagania
+Versions are pinned in Maven configuration. Docker is needed for integration tests.
 
-Aby uruchomić projekt lokalnie, potrzebujesz:
-- JDK 17+
-- Maven lub Gradle
-- Docker i Docker Compose
-- Git
+## Prerequisites
 
-## Uruchomienie projektu
+- JDK 17 or newer
+- Maven 3.9.x
+- Docker Desktop with the Linux engine enabled (for tests and local Kafka)
 
-### 1. Uruchom Kafka lokalnie
+## Run locally
 
-Najprościej użyć Docker Compose:
-
-```bash
-docker-compose up -d
-```
-
-Jeśli w repo nie ma pliku `docker-compose.yml`, można uruchomić Kafkę za pomocą oficjalnego obrazu Docker:
-```bash
-docker run -d --name kafka -p 9092:9092 \
-  -e KAFKA_CFG_NODE_ID=1 \
-  -e KAFKA_CFG_PROCESS_ROLES=broker,controller \
-  -e KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
-  -e KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
-  -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT \
-  -e KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
-  -e KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-  -e KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
-  -e ALLOW_PLAINTEXT_LISTENER=yes \
-  bitnami/kafka:latest
-```
-
-### 2. Skompiluj projekt
+Start the local Kafka broker:
 
 ```bash
-mvn clean install
+docker compose up -d kafka
 ```
 
-### 3. Uruchom aplikację
+Build both services (the first command also builds the shared contract) and run each executable JAR in a separate terminal:
 
 ```bash
-mvn spring-boot:run
+mvn -pl order-service -am package
+java -jar order-service/target/order-service-0.0.1-SNAPSHOT-exec.jar
+
+mvn -pl billing-service -am package
+java -jar billing-service/target/billing-service-0.0.1-SNAPSHOT-exec.jar
 ```
 
-## Przykładowy scenariusz
+Both services default to Kafka at `localhost:9092`; override with `SPRING_KAFKA_BOOTSTRAP_SERVERS`. Order Service listens on port `8080`, Billing Service on `8081`.
 
-Przykład biznesowy:
-- użytkownik składa zamówienie,
-- system wysyła zdarzenie `OrderCreated`,
-- drugi serwis odbiera je i generuje płatność, zapisuje status lub wysyła powiadomienie.
+Create an order:
 
-Przykładowy payload:
-```json
+```http
+POST http://localhost:8080/orders
+Content-Type: application/json
+
 {
-  "orderId": "1001",
-  "userId": "42",
-  "amount": 149.99,
-  "createdAt": "2026-11-16T12:00:00"
+  "customerId": "customer-42",
+  "amount": 149.99
 }
 ```
 
-## Konfiguracja
+The endpoint returns `202 Accepted` with an `orderId` once Kafka acknowledges the event. Invalid requests (blank customer ID or non-positive/missing amount) return `400 Bad Request` and are not published. Retrieve a processed payment using `GET http://localhost:8081/payments/orders/{orderId}`.
 
-W aplikacji należy ustawić podstawowe parametry połączenia do Kafki, np.:
+Stop the local broker when finished:
 
-```properties
-spring.kafka.bootstrap-servers=localhost:9092
-spring.kafka.consumer.group-id=demo-group
-spring.kafka.consumer.auto-offset-reset=earliest
+```bash
+docker compose down
 ```
 
-W razie potrzeby można dodać:
-- topic prefixes,
-- retry configuration,
-- DLQ (Dead Letter Topic),
-- custom serializer/deserializer.
+## Tests
 
-## Testy
+Run all unit, integration and end-to-end tests from the repository root:
 
-Projekt powinien zawierać testy integracyjne z użyciem Testcontainers, które uruchamiają rzeczywistą instancję Kafki w kontenerze.
+```bash
+mvn test
+```
 
-### Typy testów
-- test jednostkowy biznesowy,
-- test producenta (czy wiadomość trafia do topicu),
-- test konsumenta (czy wiadomość jest poprawnie przetwarzana),
-- test end-to-end (pełny przepływ od żądania do obsługi zdarzenia).
+Docker Desktop on Windows normally exposes its Linux engine through the `desktop-linux` context. If Testcontainers reports the wrong named pipe, inspect `docker context inspect desktop-linux`; for a PowerShell session that needs an explicit endpoint, set `$env:DOCKER_HOST = 'npipe:////./pipe/dockerDesktopLinuxEngine'` before running Maven.
 
-### Przykład testu integracyjnego
-Test powinien:
-1. uruchomić kontener z Kafka,
-2. wysłać żądanie do serwisu,
-3. poczekać aż wiadomość pojawi się w topicu,
-4. sprawdzić poprawność payloadu,
-5. upewnić się, że event nie został uszkodzony.
+| Level | Test | What it verifies |
+| --- | --- | --- |
+| Unit | `OrderServiceTest` | Order creation and event fields without Kafka |
+| Unit | `PaymentServiceTest` | Mapping an order event to a payment |
+| Producer integration | `OrderProducerIntegrationTest` | HTTP validation, topic, message key and event payload against Kafka in Testcontainers |
+| Consumer integration | `BillingConsumerIntegrationTest` | Payment creation, retry, duplicate handling, malformed payload and DLT routing |
+| End-to-end | `OrderToPaymentE2ETest` | POST request through Order Service, Kafka delivery and payment lookup through Billing Service |
 
-## Struktura projektu
+Integration tests start their own Kafka containers; no manually running broker is needed. Tests use unique order IDs and consumer groups to avoid stale records affecting assertions. Awaitility bounds asynchronous success checks; tests do not use `Thread.sleep()`.
+
+## Retry, idempotency and invalid events
+
+- **Transient processing failure:** Billing retries after `100 ms`, up to two retries after the initial delivery (three total attempts).
+- **DLT:** after retries are exhausted, the original message is published to `orders.DLT`. The same DLT is used immediately for non-retryable invalid events.
+- **Invalid or unknown payload:** Billing reads the message as text, parses the shared event schema strictly, and checks required fields. Malformed JSON, missing/invalid fields and unknown JSON fields are rejected without retries and sent to the DLT; they do not block later valid records.
+- **Idempotency:** payments are inserted with an atomic `putIfAbsent` keyed by `eventId`. Re-delivery of the same event does not create another payment. This guarantee is limited to this in-memory process; a production repository should enforce a durable unique constraint on `eventId`.
+- **Ordering:** the demo topic has one partition, so Kafka orders records within that partition. This is not a global ordering guarantee across topics, and the in-memory repository is not durable.
+- **Timeouts:** asynchronous integration assertions fail within a bounded Awaitility window (10–15 seconds) if the expected payment or DLT record does not appear.
+
+Implementation and test rationale are described in [docs/testing-strategy.md](docs/testing-strategy.md).
+
+## CI
+
+GitHub Actions runs `mvn --batch-mode verify` on every pull request and pushes to `main`. GitHub-hosted Ubuntu runners provide Docker for Testcontainers.
+
+## Project layout
 
 ```text
-kafka-demo/
-├── src/
-│   ├── main/
-│   │   ├── java/
-│   │   └── resources/
-│   └── test/
-│       └── java/
-├── docker-compose.yml
-├── pom.xml
-├── README.md
-└── .gitignore
+contracts/       Shared OrderCreated event contract and topic
+order-service/   HTTP endpoint, event producer, unit and producer integration tests
+billing-service/ Kafka listener, retry/DLT, idempotent in-memory payment repository, consumer tests
+e2e-tests/       End-to-end test that starts both services against Testcontainers Kafka
+.github/         Pull request CI workflow
+docs/            Testing strategy and behavior guarantees
+docker-compose.yml  Local Kafka broker
 ```
 
-## Wartości biznesowe projektu
+## Latest test result
 
-Projekt pokazuje, że potrafię pracować z:
-- asynchroniczną komunikacją między usługami,
-- brokerem wiadomości,
-- równoległym przetwarzaniem zdarzeń,
-- testami integracyjnymi opartymi na rzeczywistym środowisku,
-- wzorcami związanymi z niezawodnością i obsługą błędów.
+Verified with `mvn --batch-mode verify` and Docker Desktop on 2026-11-16:
 
-## Dalsze rozszerzenia
+| Module | Tests | Failures | Errors |
+| --- | ---: | ---: | ---: |
+| Order Service (unit + producer integration) | 3 | 0 | 0 |
+| Billing Service (unit + consumer integration) | 6 | 0 | 0 |
+| End-to-end | 1 | 0 | 0 |
+| **Total** | **10** | **0** | **0** |
 
-W kolejnych krokach można rozbudować projekt o:
-- retry policy,
-- idempotent consumer,
-- DLQ (Dead Letter Topic),
-- observability i logowanie,
-- walidację eventów,
-- testy dla duplikatów i błędów przetwarzania,
-- dodatkowe serwisy i bardziej realistyczny flow domenowy.
-
-## Podsumowanie
-
-To repozytorium jest dobrym przykładem małego, czytelnego projektu demonstracyjnego dla portfolio Java/Kafka. Pokazuje praktyczne umiejętności związane z komunikacją asynchroniczną oraz testowaniem integracyjnym działań opartych na brokerze wiadomości.
-
----
-
-Jeśli chcesz, mogę od razu przygotować Ci wersję README bardziej:
-- biznesową,
-- techniczną,
-- portfolio-ready,
-- albo dopasowaną do konkretnego projektu Java/Spring Boot z nazwami klas i endpointów.
+The local Compose broker was also started and passed its healthcheck.
