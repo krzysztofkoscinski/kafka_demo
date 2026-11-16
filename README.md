@@ -119,6 +119,8 @@ Implementation and test rationale are described in [docs/testing-strategy.md](do
 
 GitHub Actions runs `mvn --batch-mode verify` on every pull request and pushes to `main`. GitHub-hosted Ubuntu runners provide Docker for Testcontainers.
 
+After each run, Surefire XML and text reports from all Maven modules are uploaded as the `test-reports-<run-id>` artifact for 14 days. The upload runs even if tests fail. Download it from the workflow run's **Artifacts** section.
+
 ## Project layout
 
 ```text
