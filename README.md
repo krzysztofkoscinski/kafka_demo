@@ -97,7 +97,7 @@ Przykładowy payload:
 }
 ```
 
-## Configuracja
+## Konfiguracja
 
 W aplikacji należy ustawić podstawowe parametry połączenia do Kafki, np.:
 
